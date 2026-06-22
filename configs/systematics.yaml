@@ -1,0 +1,141 @@
+runtime:
+  device: cuda
+
+paths:
+  # Frozen base flows (output of train_base_flows.py); the residuals are trained on top.
+  score_base_model: ../models/score_density.pt
+  kin_base_model:   ../models/kin_density.pt
+  # Residual systematic models — the score residual learns p(y|x,ν) in the unbounded
+  # pre-sigmoid score space; the kin residual learns p(x|c,ν).
+  score_residual_model: ../models/score_density_residuals.pt
+  kin_residual_model:   ../models/kin_density_residuals.pt
+
+# Nominal generator — used only for validation sampling
+generator:
+  center_A: [-0.5, 0.0]
+  center_B: [+0.5, 0.0]
+  sigma_A:  [0.9, 0.6]
+  sigma_B:  [0.6, 0.4]
+  distortion_strength: 0.0
+  sigmoid_y: false
+
+
+# Systematic generators at the unit-scale boundary (±1). The y_shift_scale /
+# y_squeeze_scale carry the score-space systematic; inert for kin training
+# (kin uses x only) and active for score training (which draws nominal y at ν=±1).
+generator_shift_up:
+  center_A: [-0.5, 0.0]
+  center_B: [+0.5, 0.0]
+  sigma_A:  [0.9, 0.6]
+  sigma_B:  [0.6, 0.4]
+  variation_shift:   1.0
+  variation_squeeze: 0.0
+  shift_scale:   0.3
+  squeeze_scale: 0.2
+  y_shift_scale:   0.3
+  y_squeeze_scale: 0.2
+  distortion_strength: 0.0
+  sigmoid_y: false
+
+generator_shift_down:
+  center_A: [-0.5, 0.0]
+  center_B: [+0.5, 0.0]
+  sigma_A:  [0.9, 0.6]
+  sigma_B:  [0.6, 0.4]
+  variation_shift:  -1.0
+  variation_squeeze: 0.0
+  shift_scale:   0.3
+  squeeze_scale: 0.2
+  y_shift_scale:   0.3
+  y_squeeze_scale: 0.2
+  distortion_strength: 0.0
+  sigmoid_y: false
+
+generator_squeeze_up:
+  center_A: [-0.5, 0.0]
+  center_B: [+0.5, 0.0]
+  sigma_A:  [0.9, 0.6]
+  sigma_B:  [0.6, 0.4]
+  variation_shift:   0.0
+  variation_squeeze: 1.0
+  shift_scale:   0.3
+  squeeze_scale: 0.2
+  y_shift_scale:   0.3
+  y_squeeze_scale: 0.2
+  distortion_strength: 0.0
+  sigmoid_y: false
+
+generator_squeeze_down:
+  center_A: [-0.5, 0.0]
+  center_B: [+0.5, 0.0]
+  sigma_A:  [0.9, 0.6]
+  sigma_B:  [0.6, 0.4]
+  variation_shift:   0.0
+  variation_squeeze: -1.0
+  shift_scale:   0.3
+  squeeze_scale: 0.2
+  y_shift_scale:   0.3
+  y_squeeze_scale: 0.2
+  distortion_strength: 0.0
+  sigmoid_y: false
+
+
+kin_systematics:
+  - {generator: generator_shift_up,     m: [ 1.0,  0.0]}
+  - {generator: generator_shift_down,   m: [-1.0,  0.0]}
+  - {generator: generator_squeeze_up,   m: [ 0.0,  1.0]}
+  - {generator: generator_squeeze_down, m: [ 0.0, -1.0]}
+
+# Train the score residual on the p(y|x,ν) templates (drawn distorsion=False).
+score_systematics:
+  - {generator: generator_shift_up,     m: [ 1.0,  0.0]}
+  - {generator: generator_shift_down,   m: [-1.0,  0.0]}
+  - {generator: generator_squeeze_up,   m: [ 0.0,  1.0]}
+  - {generator: generator_squeeze_down, m: [ 0.0, -1.0]}
+
+# p(y | x, c): features = y (2D, UNBOUNDED pre-sigmoid score), context = c_onehot(2) + x(2D) = 4
+score_flow:
+  features: 2
+  context: 4
+  bins: 20
+  transforms: 3
+  hidden_features: [128, 128, 128]
+
+# p(x | c): features = x (2D), context = c_onehot(2)
+kin_flow:
+  features: 2
+  context: 2
+  bins: 20
+  transforms: 2
+  hidden_features: [128,128,128]
+
+
+# Score residual model — 2 nuisances: learns p(y|x,ν) in pre-sigmoid space.
+residual_score_model:
+  features_dim: 2
+  context_dim: 4
+  num_nuisances: 2
+  num_residual_layers: 2
+  hidden_features: [128,128,128]
+  type: flow
+
+# Kin residual model — 2 nuisances (ν_shift, ν_squeeze)
+residual_kin_model:
+  features_dim: 2
+  context_dim: 2
+  num_nuisances: 2
+  num_residual_layers: 1
+  hidden_features: [128,128]
+  type: flow
+
+training:
+  score:
+    batch_size: 1024
+    nepochs: 60
+    steps_per_epoch: 1000
+    lr: 1.0e-4
+  kin:
+    batch_size: 1024
+    nepochs: 60
+    steps_per_epoch: 1000
+    lr: 1.0e-4

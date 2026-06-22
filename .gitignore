@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Regenerable toy dataset (created by generate_dataset.py)
+data/
+
+# Figure / validation outputs
+validation/
+validation_transform/
+*.png
+*.pdf
+
+# Note: models/*.pt ARE committed (the pretrained base + residual checkpoints).

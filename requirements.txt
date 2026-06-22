@@ -1,0 +1,6 @@
+torch
+zuko
+numpy
+scipy
+matplotlib
+pyyaml

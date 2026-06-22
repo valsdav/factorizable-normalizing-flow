@@ -1,0 +1,25 @@
+runtime:
+  device: cuda
+
+paths:
+  dataset: ../data/dataset.pt
+
+n_events: 100000
+
+# Nominal toy data, modelled in PRE-SIGMOID score space (sigmoid_y: false): no
+# systematic pulls, no distortion. This is the reference the base flows are
+# validated against; the systematic (ν) variations live in configs/systematics.yaml.
+generator:
+  center_A: [-0.5, 0.0]
+  center_B: [+0.5, 0.0]
+  sigma_A:  [0.9, 0.6]
+  sigma_B:  [0.6, 0.4]
+  variation_shift:   0.0
+  variation_squeeze: 0.0
+  shift_scale:   1
+  shift_dir:     [1.0, 0.0]
+  squeeze_scale: 1
+  y_shift_scale:   0.0
+  y_squeeze_scale: 0.0
+  distortion_strength: 0.0
+  sigmoid_y: false

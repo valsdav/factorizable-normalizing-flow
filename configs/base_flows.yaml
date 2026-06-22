@@ -1,0 +1,50 @@
+runtime:
+  device: cuda
+
+paths:
+  score_model: ../models/score_density.pt
+  kin_model:   ../models/kin_density.pt
+
+# v15: PRE-SIGMOID score space (sigmoid_y: false). The SCORE base flow MUST be
+# retrained for v15 (new observable space). The KIN flow is sigmoid-independent
+# (x is unchanged), so retraining it is harmless / it can be reused from v13/v14.
+generator:
+  center_A: [-0.5, 0.0]
+  center_B: [+0.5, 0.0]
+  sigma_A:  [0.9, 0.6]
+  sigma_B:  [0.6, 0.4]
+  variation_shift:   0.0
+  variation_squeeze: 0.0
+  distortion_strength: 0.0
+  sigmoid_y: false
+
+# p(y | x, c): features = y (2D, UNBOUNDED pre-sigmoid score), context = c_onehot(2) + x(2D) = 4
+# NB: with no sigmoid the score can reach ~±6. Verify it fits the NSF spline
+# support (zuko default bound ≈ ±5); if the tails fall outside, standardise y
+# before the flow or widen the spline bound.
+score_flow:
+  features: 2
+  context: 4
+  bins: 20
+  transforms: 3
+  hidden_features: [128, 128, 128]
+
+# p(x | c): features = x (2D), context = c_onehot(2)  — unchanged from v14
+kin_flow:
+  features: 2
+  context: 2
+  bins: 20
+  transforms: 2
+  hidden_features: [128,128,128]
+
+training:
+  score:
+    batch_size: 1024
+    nepochs: 100
+    steps_per_epoch: 1000
+    lr: 1.0e-4
+  kin:
+    batch_size: 1024
+    nepochs: 100
+    steps_per_epoch: 1000
+    lr: 1.0e-4
