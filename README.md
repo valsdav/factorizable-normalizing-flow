@@ -60,7 +60,7 @@ code falls back to CPU automatically if CUDA is unavailable).
 ## Repository contents
 
 ```
-factorizable-flow/
+factorizable-normalizing-flow/
 ├── residual_flow.py                 # the method: SystematicCorrectedModel,
 │                                     #   IndependentPolynomialResidualTransform, PermutationLayer
 ├── generator.py                     # ParametricLikelihoodDataset — the 2-class toy + truth
@@ -70,7 +70,7 @@ factorizable-flow/
 ├── train_systematics.py             # train the residual systematic models on top of them
 │
 ├── validate_flows.py                # validate base + residual models vs generator truth
-├── visualize_residual_transform.py  # showcase the residual scale/shift response + displacement field
+├── visualize_residual_transform.py  # showcase: scale/shift response + displacement field + cross-term
 │
 ├── generate_dataset.py              # (optional) materialize a toy dataset to disk
 ├── visualize_dataset.py             # (optional) inspect a saved dataset
@@ -106,10 +106,14 @@ python visualize_residual_transform.py -c configs/base_flows.yaml \
 - **`residual_*_response`** — the local **scale** `exp(s)` and **shift** `Δ` at representative
   phase-space points as each nuisance ν is swept (the factorized response);
 - **`residual_*_field_nu{p,m}*`** — the displacement field `Δ = R(·;ν) − ·` over the phase space at
-  fixed ν, overlaid on the model (and generator-truth) densities.
+  fixed ν, overlaid on the model (and generator-truth) densities;
+- **`residual_*_crossterm_*`** — the nuisance **cross-term** decomposition: the response over the
+  (ν_i, ν_j) plane split into `full = additive + cross`, isolating the bilinear `C·ν_i·ν_j` term
+  (≈ 0 for a purely additive residual).
 
 Useful flags: `--direction forward|inverse` (correction vs deformation), `--m-value` (|ν| for the
-field), `--which kin|score|both`, `--score-x "0,0;1.5,0"` (the score residual is conditional on x).
+field), `--which kin|score|both`, `--score-x "0,0;1.5,0"` (the score residual is conditional on x),
+`--response-dims 0` (show only one feature row), `--no-crossterm` (skip the cross-term figures).
 
 ---
 
@@ -161,4 +165,4 @@ Paths are resolved relative to the config file. Key sections:
 
 ## License
 
-See [LICENSE](LICENSE) (to be finalized before publishing).
+See [LICENSE](LICENSE).
