@@ -63,10 +63,21 @@ def _build_base(flow_cfg, weights_path, device):
 
 
 def _build_residual(base, res_cfg, weights_path, device):
+    # Honour cross-term / damping config so the architecture AND the s,t response match
+    # the trained checkpoint (cross_term_pairs sizes a buffer that must match; the
+    # dampings are not in the state_dict but scale the response we plot).
+    extra = {}
+    pairs = res_cfg.get("cross_term_pairs")
+    if pairs:
+        extra["cross_term_pairs"] = [tuple(int(i) for i in pr) for pr in pairs]
+    if "cross_term_damping" in res_cfg:
+        extra["cross_term_damping"] = float(res_cfg["cross_term_damping"])
+    if "quadratic_damping" in res_cfg:
+        extra["quadratic_damping"] = float(res_cfg["quadratic_damping"])
     residual = SystematicCorrectedModel(
         base, features_dim=res_cfg["features_dim"], context_dim=res_cfg["context_dim"],
         num_nuisances=res_cfg["num_nuisances"], num_residual_layers=res_cfg["num_residual_layers"],
-        hidden_features=res_cfg["hidden_features"], type=res_cfg["type"],
+        hidden_features=res_cfg["hidden_features"], type=res_cfg["type"], **extra,
     ).to(device)
     residual.load_state_dict(torch.load(weights_path, map_location=device), strict=False)
     residual.eval()
@@ -135,23 +146,27 @@ def _onehot(cl, B, device):
 @torch.no_grad()
 def plot_response(residual, *, model_tag, feat_syms, var_sym, points, ctx_builder, K,
                   out_dir, device, direction="forward", m_range=(-2.0, 2.0), n_m=41,
-                  title_extra="", display_tag=None):
+                  title_extra="", display_tag=None, dims=None):
     """Scan local scale and net shift vs each nuisance, per representative point.
 
     points       : list of (label, feature_point[D])  — where in phase space to probe.
     ctx_builder  : fn(cl, B) -> context tensor [B, ctx_dim]  for class cl.
     feat_syms    : per-dim axis symbols, e.g. ('x₁','x₂') or ('y₁','y₂').
     var_sym      : base observable symbol ('x' or 'y') used in legend coordinates.
+    dims         : feature dims to show as rows (default all); e.g. [0] shows only the
+                   first feature (y₁ / x₁) → a single row of plots.
     """
     D = len(feat_syms)
+    show_dims = list(range(D)) if dims is None else [d for d in dims if 0 <= d < D]
+    nrow = len(show_dims)
     m_vals = np.linspace(*m_range, n_m)
     m_t = torch.tensor(m_vals, dtype=torch.float32, device=device)
 
     cls_styles = {0: ("Class A", "-"), 1: ("Class B", "--")}
     pt_colors = plt.cm.viridis(np.linspace(0.05, 0.85, len(points)))
 
-    # rows = feature dims, columns = [scale, shift] per nuisance
-    fig, axes = plt.subplots(D, 2 * K, figsize=(5 * K, 3.4 * D), squeeze=False)
+    # rows = selected feature dims, columns = [scale, shift] per nuisance
+    fig, axes = plt.subplots(nrow, 2 * K, figsize=(5 * K, 3.4 * nrow), squeeze=False)
 
     for k in range(K):                                   # nuisance index
         for pidx, (plabel, pvec) in enumerate(points):
@@ -165,16 +180,16 @@ def plot_response(residual, *, model_tag, feat_syms, var_sym, points, ctx_builde
                 scale, shift, _ = scale_and_shift(residual, x, ctx, m, direction)
                 scale = scale.cpu().numpy()
                 shift = shift.cpu().numpy()
-                for d in range(D):
-                    axes[d, 2 * k].plot(
+                for ridx, d in enumerate(show_dims):
+                    axes[ridx, 2 * k].plot(
                         m_vals, scale[:, d], ls=ls, color=pt_colors[pidx], lw=1.8)
-                    axes[d, 2 * k + 1].plot(
+                    axes[ridx, 2 * k + 1].plot(
                         m_vals, shift[:, d], ls=ls, color=pt_colors[pidx], lw=1.8)
 
-    for d in range(D):
+    for ridx, d in enumerate(show_dims):
         for k in range(K):
-            a_s = axes[d, 2 * k]
-            a_t = axes[d, 2 * k + 1]
+            a_s = axes[ridx, 2 * k]
+            a_t = axes[ridx, 2 * k + 1]
             for a in (a_s, a_t):
                 a.axvline(0, color="k", lw=0.6, ls=":")
                 a.set_xlabel(f"ν[{k}]")
@@ -392,10 +407,86 @@ def plot_vector_field(residual, *, model_tag, axis_syms, var_sym, grid_range, ct
 
 
 # ---------------------------------------------------------------------------
+# Figure 3: nuisance cross-term — response over the (ν_i, ν_j) plane
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def plot_cross_term(residual, *, model_tag, feat_syms, var_sym, probe, ctx_builder, K,
+                    out_dir, device, direction="forward", nu_pair=(0, 1),
+                    nu_syms=(r"\nu_\mathrm{shift}", r"\nu_\mathrm{squeeze}"),
+                    nu_range=(-2.0, 2.0), ngrid=41, dims=None, classes=(0, 1),
+                    title_extra=""):
+    """Expose the nuisance CROSS-TERM by mapping the response over the (ν_i, ν_j) plane.
+
+    At a fixed probe point the affine parameters log-scale ``s`` and shift ``t`` (both
+    additive polynomials in ν, plus the cross net) are evaluated on a 2D ν grid and
+    decomposed as
+
+        full(ν_i, ν_j)  =  additive[ single_i + single_j ]  +  cross
+
+    where  cross = full − additive  isolates the bilinear  C·ν_i·ν_j  term — ≈0 for an
+    additive residual, a sign-flipping hyperbolic pattern when the cross net is active.
+    One figure per class; needs K≥2 (a nuisance pair to cross)."""
+    if K < 2:
+        print("  cross-term plot needs ≥2 nuisances → skipping.")
+        return
+    D = len(feat_syms)
+    show_dims = list(range(D)) if dims is None else [d for d in dims if 0 <= d < D]
+    i, j = nu_pair
+    gv = np.linspace(*nu_range, ngrid)
+    GI, GJ = np.meshgrid(gv, gv)                    # GI=ν_i (cols/x), GJ=ν_j (rows/y)
+    G = GI.size
+    ic = int(np.argmin(np.abs(gv)))                # index of ν≈0
+    ext = [gv[0], gv[-1], gv[0], gv[-1]]
+    x = torch.tensor(probe, dtype=torch.float32, device=device).unsqueeze(0)
+    x = x.expand(G, -1).contiguous()
+
+    for cl in classes:
+        ctx = ctx_builder(cl, G)
+        m = torch.zeros(G, K, device=device)
+        m[:, i] = torch.tensor(GI.ravel(), dtype=torch.float32, device=device)
+        m[:, j] = torch.tensor(GJ.ravel(), dtype=torch.float32, device=device)
+        scale, shift, _ = scale_and_shift(residual, x, ctx, m, direction)
+        s_all = torch.log(scale.clamp_min(1e-6)).cpu().numpy().reshape(ngrid, ngrid, D)
+        t_all = shift.cpu().numpy().reshape(ngrid, ngrid, D)
+
+        for d in show_dims:
+            rows = [(r"log-scale  $s$", s_all[:, :, d]),
+                    (rf"shift  $\Delta {var_sym}_{d + 1}$", t_all[:, :, d])]
+            fig, axes = plt.subplots(2, 3, figsize=(13.5, 8.2))
+            for ri, (rlabel, arr) in enumerate(rows):
+                add = arr[ic:ic + 1, :] + arr[:, ic:ic + 1] - arr[ic, ic]  # single_i + single_j − origin
+                cross = arr - add
+                fa = max(abs(arr.min()), abs(arr.max()), 1e-9)
+                ca = max(abs(cross.min()), abs(cross.max()), 1e-9)
+                panels = [("full", arr, fa),
+                          ("additive  ($i$+$j$)", add, fa),
+                          ("cross-term  (full − additive)", cross, ca)]
+                for ci, (clabel, data, amp) in enumerate(panels):
+                    ax = axes[ri, ci]
+                    im = ax.imshow(data, origin="lower", extent=ext, aspect="auto",
+                                   cmap="RdBu_r", vmin=-amp, vmax=amp)
+                    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                    ax.axhline(0, color="k", lw=0.5, ls=":")
+                    ax.axvline(0, color="k", lw=0.5, ls=":")
+                    ax.set_xlabel(f"${nu_syms[0]}$")
+                    ax.set_ylabel(f"${nu_syms[1]}$")
+                    ax.set_title(f"{rlabel} — {clabel}", fontsize=9)
+            fig.suptitle(f"Residual {model_tag} — nuisance cross-term on {feat_syms[d]}  "
+                         f"(class {'A' if cl == 0 else 'B'}, {direction} map){title_extra}\n"
+                         f"probe {var_sym}=({probe[0]:g}, {probe[1]:g})", fontsize=12)
+            fig.tight_layout()
+            dsym = feat_syms[d].translate(str.maketrans("₁₂₃", "123"))
+            cltag = "A" if cl == 0 else "B"
+            _save(fig, out_dir, f"residual_{model_tag}_crossterm_{dsym}_class{cltag}")
+
+
+# ---------------------------------------------------------------------------
 # Drivers
 # ---------------------------------------------------------------------------
 
-def run_kin(base_cfg, sys_cfg, device, out_dir, direction, m_value, n):
+def run_kin(base_cfg, sys_cfg, device, out_dir, direction, m_value, n, response_dims=None,
+            crossterm=True, crossterm_probe=(1.0, 0.5)):
     res_k = sys_cfg.get("residual_kin_model")
     if res_k is None or int(res_k.get("num_nuisances", 0)) == 0:
         print("  kin residual absent / num_nuisances==0 → skipping.")
@@ -425,15 +516,21 @@ def run_kin(base_cfg, sys_cfg, device, out_dir, direction, m_value, n):
 
     plot_response(residual, model_tag="kin", feat_syms=("x₁", "x₂"), var_sym="x",
                   points=points, ctx_builder=ctx_builder, K=K, out_dir=out_dir,
-                  device=device, direction=direction, display_tag="kin")
+                  device=device, direction=direction, display_tag="kin",
+                  dims=response_dims)
     truth_fn = _make_kin_truth_fn(sys_cfg, device, n_truth=min(n, 40_000))
     plot_vector_field(residual, model_tag="kin", axis_syms=("x₁", "x₂"), var_sym="x",
                       grid_range=grid_range, ctx_builder=ctx_builder, K=K,
                       out_dir=out_dir, device=device, truth_fn=truth_fn,
                       direction=direction, m_value=m_value)
+    if crossterm:
+        plot_cross_term(residual, model_tag="kin", feat_syms=("x₁", "x₂"), var_sym="x",
+                        probe=list(crossterm_probe), ctx_builder=ctx_builder, K=K,
+                        out_dir=out_dir, device=device, direction=direction, dims=response_dims)
 
 
-def run_score(base_cfg, sys_cfg, device, out_dir, direction, m_value, n, x_ctxs):
+def run_score(base_cfg, sys_cfg, device, out_dir, direction, m_value, n, x_ctxs,
+              response_dims=None, crossterm=True, crossterm_probe=(0.0, 0.0)):
     res_s = sys_cfg.get("residual_score_model")
     if res_s is None or int(res_s.get("num_nuisances", 0)) == 0:
         print("  score residual absent / num_nuisances==0 → skipping.")
@@ -482,11 +579,17 @@ def run_score(base_cfg, sys_cfg, device, out_dir, direction, m_value, n, x_ctxs)
         plot_response(residual, model_tag=f"score{suffix}", feat_syms=("y₁", "y₂"),
                       var_sym="y", points=points, ctx_builder=ctx_builder, K=K,
                       out_dir=out_dir, device=device, direction=direction,
-                      title_extra=f"  [{xtag}]", display_tag="score")
+                      title_extra=f"  [{xtag}]", display_tag="score",
+                      dims=response_dims)
         plot_vector_field(residual, model_tag=f"score{suffix}", axis_syms=("y₁", "y₂"),
                           var_sym="y", grid_range=grid_range, ctx_builder=ctx_builder, K=K,
                           out_dir=out_dir, device=device, truth_fn=truth_fn,
                           direction=direction, m_value=m_value, title_extra=f"  [{xtag}]")
+        if crossterm:
+            plot_cross_term(residual, model_tag=f"score{suffix}", feat_syms=("y₁", "y₂"),
+                            var_sym="y", probe=list(crossterm_probe), ctx_builder=ctx_builder,
+                            K=K, out_dir=out_dir, device=device, direction=direction,
+                            dims=response_dims, title_extra=f"  [{xtag}]")
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +611,30 @@ def main():
     p.add_argument("--score-x", default="0,0;1.5,0",
                    help="';'-separated x-context points for the score residual "
                         "(it is conditional on x), e.g. '0,0;1.5,0'")
+    p.add_argument("--response-dims", default=None,
+                   help="Feature dims to show as rows in the response figure, comma-separated "
+                        "(0 = y₁/x₁, 1 = y₂/x₂). E.g. '0' → only y₁ as a single row. "
+                        "Default: all dims. The vector field is unaffected.")
+    p.add_argument("--no-crossterm", action="store_true",
+                   help="Skip the nuisance cross-term decomposition figures "
+                        "(full = additive + cross over the ν_shift–ν_squeeze plane).")
+    p.add_argument("--crossterm-y", default="0,0",
+                   help="Fixed y point (pre-sigmoid score) at which the SCORE cross-term "
+                        "is evaluated, 'y1,y2' (default '0,0').")
+    p.add_argument("--crossterm-x", default="1.0,0.5",
+                   help="Fixed x point at which the KIN cross-term is evaluated, "
+                        "'x1,x2' (default '1.0,0.5').")
     args = p.parse_args()
+
+    def _parse_point(s):
+        a, b = s.split(",")
+        return [float(a), float(b)]
+    crossterm_x = _parse_point(args.crossterm_x)
+    crossterm_y = _parse_point(args.crossterm_y)
+
+    response_dims = None
+    if args.response_dims:
+        response_dims = [int(t) for t in args.response_dims.split(",") if t.strip() != ""]
 
     score_x_ctxs = []
     for tok in args.score_x.split(";"):
@@ -541,11 +667,14 @@ def main():
         device = "cpu"
     print(f"Device: {device}  |  Output: {args.out_dir}/  |  direction: {args.direction}")
 
+    crossterm = not args.no_crossterm
     if args.which in ("both", "kin"):
-        run_kin(base_cfg, sys_cfg, device, args.out_dir, args.direction, args.m_value, args.n)
+        run_kin(base_cfg, sys_cfg, device, args.out_dir, args.direction, args.m_value, args.n,
+                response_dims=response_dims, crossterm=crossterm, crossterm_probe=crossterm_x)
     if args.which in ("both", "score"):
         run_score(base_cfg, sys_cfg, device, args.out_dir, args.direction, args.m_value,
-                  args.n, score_x_ctxs)
+                  args.n, score_x_ctxs, response_dims=response_dims, crossterm=crossterm,
+                  crossterm_probe=crossterm_y)
 
     print(f"\nDone. Plots in {args.out_dir}/")
 
